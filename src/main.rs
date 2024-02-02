@@ -1,13 +1,28 @@
 use std::{
-    fs::OpenOptions,
-    io::{self, Write},
-    sync::Mutex,
-    time::Instant,
+    fs::OpenOptions, io::{self, Write}, path::Path, sync::Mutex, time::Instant
 };
 
 use redb::{backends::FileBackend, Database, Error, StorageBackend, TableDefinition};
 
 const TABLE: TableDefinition<(&[u8; 32], u64), &[u8; 64]> = TableDefinition::new("outboard");
+
+fn fs_exists_bench(n: u64) {
+    let path = std::env::temp_dir().join("fs_exists_bench");
+    std::fs::create_dir_all(&path).ok();
+    let t0 = Instant::now();
+    for i in 0..n {
+        let path = path.join(format!("file-{}", i));
+        std::fs::write(path, vec![]).ok();
+    }
+    println!("create: {} {}", n, t0.elapsed().as_secs_f64());
+    let t0 = Instant::now();
+    for i in 0..n {
+        let path = path.join(format!("file-{}", i));
+        let _ = path.exists();
+    }
+    println!("fs_exists_bench: {} {}", n, t0.elapsed().as_secs_f64());
+    std::fs::remove_dir_all(&path).ok();
+}
 
 #[derive(Debug)]
 struct LogBackend<T: StorageBackend>(T);
@@ -82,6 +97,47 @@ impl StorageBackend for FastBackend {
     }
 }
 
+
+#[derive(Debug)]
+struct SuperFastBackend {
+    inner: FileBackend,
+}
+
+impl SuperFastBackend {
+    fn new(file: std::fs::File) -> std::result::Result<Self, redb::Error> {
+        let inner = FileBackend::new(file)?;
+        Ok(Self {
+            inner,
+        })
+    }
+}
+
+impl StorageBackend for SuperFastBackend {
+    fn len(&self) -> io::Result<u64> {
+        self.inner.len()
+    }
+
+    fn read(&self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+        self.inner.read(offset, len)
+    }
+
+    fn set_len(&self, len: u64) -> io::Result<()> {
+        self.inner.set_len(len)
+    }
+
+    fn sync_data(&self, eventual: bool) -> io::Result<()> {
+        if !eventual {
+            self.inner.sync_data(eventual)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn write(&self, offset: u64, data: &[u8]) -> std::result::Result<(), std::io::Error> {
+        self.inner.write(offset, data)
+    }
+}
+
 fn bench<B: StorageBackend>(
     text: &str,
     make_backend: impl Fn(std::fs::File) -> std::result::Result<B, redb::Error>,
@@ -144,6 +200,7 @@ fn bench<B: StorageBackend>(
 }
 
 fn main() -> Result<(), Error> {
+    fs_exists_bench(100000);
     bench(
         "no sync",
         |file| Ok(FileBackend::new(file)?),
@@ -154,6 +211,15 @@ fn main() -> Result<(), Error> {
     bench(
         "flush/fast eventual",
         |file| Ok(FastBackend::new(file)?),
+        100000,
+        |tx| tx.set_durability(redb::Durability::Eventual),
+        |f| {
+            f.flush().ok();
+        },
+    )?;
+    bench(
+        "no sync/super fast eventual",
+        |file| Ok(SuperFastBackend::new(file)?),
         100000,
         |tx| tx.set_durability(redb::Durability::Eventual),
         |f| {
