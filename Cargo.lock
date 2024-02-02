@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "redb-test"
+name = "redb-vs-fs"
 version = "0.1.0"
 dependencies = [
  "redb",

@@ -1,66 +1,50 @@
-use std::{time::Instant, collections::hash_map::DefaultHasher, hash::Hasher, sync::Arc};
+use std::{collections::hash_map::DefaultHasher, hash::Hasher, io::Write, sync::Arc, time::Instant};
 
 use redb::{Database, Error, ReadableTable, TableDefinition};
 
-const TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("pages");
-
-fn mk_key(i: u64, j: u64) -> [u8; 16] {
-    let mut key = [0u8; 16];
-    key[..8].copy_from_slice(&i.to_be_bytes());
-    key[8..].copy_from_slice(&j.to_be_bytes());
-    key
-}
+const TABLE: TableDefinition<(&[u8;32], u64), &[u8;64]> = TableDefinition::new("outboard");
 
 fn main() -> Result<(), Error> {
-    let mut builder = Database::builder();
+    let n = 100000u64;
 
+    let mut builder = Database::builder();
     builder.set_cache_size(1024 * 1024 * 1024);
+    std::fs::remove_file("test.redb").ok();
     let db = builder.create("test.redb")?;
 
-    println!("writing");
-    for i in 0..100u64 {
+    println!("writing to redb with non durable transactions");
+    let t0 = Instant::now();
+    for i in 0..n {
         let mut write_txn = db.begin_write()?;
-        write_txn.set_durability(redb::Durability::Eventual);
+        write_txn.set_durability(redb::Durability::None);
         {
             let mut table = write_txn.open_table(TABLE)?;
-            for j in 0..100u64 {
-                let key = mk_key(i, j);
-                table.insert(key.as_slice(), [0u8; 1024 * 1024].as_slice())?;
-            }
+            let hash = [0u8; 32];
+            let pair = [0u8; 64];
+            table.insert(&(&hash, i), &pair)?;
         }
         write_txn.commit()?;
-        println!("{}", i);
     }
+    let txn = db.begin_write()?;
+    txn.commit()?;
+    drop(db);
+    let dt_redb = t0.elapsed().as_secs_f64();
+    println!("writing done {} {}s", n, dt_redb);
+    std::fs::remove_file("test.redb").ok();
 
-    println!("reading");
+    std::fs::remove_file("test.obao4").ok();
+    let mut file = std::fs::File::create("test.obao4")?;
+    println!("appending to a file");
     let t0 = Instant::now();
-    let db = Arc::new(db);
-    let handles = (0..16).map(|i| {
-        let db = db.clone();
-        std::thread::spawn(move || {
-            let mut hasher = DefaultHasher::new();
-            let mut total = 0;
-            for i in 0..100u64 {
-                let read_txn = db.begin_read()?;
-                let table = read_txn.open_table(TABLE)?;
-                for j in 0..100u64 {
-                    let key = mk_key(i, j);
-                    let data = table.get(key.as_slice())?.unwrap();
-                    total += data.value().len();
-                    hasher.write(data.value());
-                }
-                println!("{}", i);
-            }
-            let hash = hasher.finish();
-            Ok::<_, redb::Error>(hash)
-        })
-    }).collect::<Vec<_>>();
-    for handle in handles {
-        handle.join().unwrap()?;
+    for i in 0..n {
+        file.write([0u8; 64].as_ref())?;
     }
+    file.flush()?;
+    drop(file);
+    let dt_file = t0.elapsed().as_secs_f64();
+    println!("writing done {} {}s", n, dt_file);
+    std::fs::remove_file("test.obao4")?;
 
-    println!("reading done {}", t0.elapsed().as_secs_f64());
-    // assert_eq!(table.get("my_key")?.unwrap().value(), 123);
-
+    println!(":-( {}", dt_redb / dt_file);
     Ok(())
 }
