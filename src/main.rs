@@ -1,5 +1,8 @@
 use std::{
-    fs::OpenOptions, io::{self, Write}, path::Path, sync::Mutex, time::Instant
+    fs::OpenOptions,
+    io::{self, Write},
+    sync::Mutex,
+    time::Instant,
 };
 
 use redb::{backends::FileBackend, Database, Error, StorageBackend, TableDefinition};
@@ -11,16 +14,22 @@ fn fs_exists_bench(n: u64) {
     std::fs::create_dir_all(&path).ok();
     let t0 = Instant::now();
     for i in 0..n {
-        let path = path.join(format!("file-{}", i));
+        let x = i * 2;
+        let path = path.join(format!("file-{}", x));
         std::fs::write(path, vec![]).ok();
     }
     println!("create: {} {}", n, t0.elapsed().as_secs_f64());
     let t0 = Instant::now();
-    for i in 0..n {
+    for i in 0..n * 2 {
         let path = path.join(format!("file-{}", i));
         let _ = path.exists();
     }
-    println!("fs_exists_bench: {} {}", n, t0.elapsed().as_secs_f64());
+    println!(
+        "fs_exists_bench: {}/{} {}",
+        n,
+        n,
+        t0.elapsed().as_secs_f64()
+    );
     std::fs::remove_dir_all(&path).ok();
 }
 
@@ -97,7 +106,6 @@ impl StorageBackend for FastBackend {
     }
 }
 
-
 #[derive(Debug)]
 struct SuperFastBackend {
     inner: FileBackend,
@@ -106,9 +114,7 @@ struct SuperFastBackend {
 impl SuperFastBackend {
     fn new(file: std::fs::File) -> std::result::Result<Self, redb::Error> {
         let inner = FileBackend::new(file)?;
-        Ok(Self {
-            inner,
-        })
+        Ok(Self { inner })
     }
 }
 
