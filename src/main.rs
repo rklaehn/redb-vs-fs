@@ -1,13 +1,90 @@
 use std::{
-    collections::hash_map::DefaultHasher, hash::Hasher, io::Write, sync::Arc, time::Instant,
+    fs::OpenOptions,
+    io::{self, Write},
+    sync::Mutex,
+    time::Instant,
 };
 
-use redb::{Database, Error, ReadableTable, TableDefinition};
+use redb::{backends::FileBackend, Database, Error, StorageBackend, TableDefinition};
 
 const TABLE: TableDefinition<(&[u8; 32], u64), &[u8; 64]> = TableDefinition::new("outboard");
 
-fn bench(
+#[derive(Debug)]
+struct LogBackend<T: StorageBackend>(T);
+
+impl<T: StorageBackend> StorageBackend for LogBackend<T> {
+    fn len(&self) -> io::Result<u64> {
+        let res = self.0.len()?;
+        println!("len {}", res);
+        Ok(res)
+    }
+
+    fn read(&self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+        println!("read {} {}", offset, len);
+        self.0.read(offset, len)
+    }
+
+    fn set_len(&self, len: u64) -> io::Result<()> {
+        println!("set_len {}", len);
+        self.0.set_len(len)
+    }
+
+    fn sync_data(&self, eventual: bool) -> io::Result<()> {
+        println!("sync_data {}", eventual);
+        self.0.sync_data(eventual)
+    }
+
+    fn write(&self, offset: u64, data: &[u8]) -> std::result::Result<(), std::io::Error> {
+        println!("write {} {}", offset, data.len());
+        self.0.write(offset, data)
+    }
+}
+
+#[derive(Debug)]
+struct FastBackend {
+    inner: FileBackend,
+    file: Mutex<std::fs::File>,
+}
+
+impl FastBackend {
+    fn new(file: std::fs::File) -> std::result::Result<Self, redb::Error> {
+        let inner = FileBackend::new(file.try_clone()?)?;
+        Ok(Self {
+            inner,
+            file: Mutex::new(file),
+        })
+    }
+}
+
+impl StorageBackend for FastBackend {
+    fn len(&self) -> io::Result<u64> {
+        self.inner.len()
+    }
+
+    fn read(&self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+        self.inner.read(offset, len)
+    }
+
+    fn set_len(&self, len: u64) -> io::Result<()> {
+        self.inner.set_len(len)
+    }
+
+    fn sync_data(&self, eventual: bool) -> io::Result<()> {
+        if !eventual {
+            self.inner.sync_data(eventual)
+        } else {
+            self.file.lock().unwrap().flush()
+        }
+    }
+
+    fn write(&self, offset: u64, data: &[u8]) -> std::result::Result<(), std::io::Error> {
+        self.inner.write(offset, data)
+    }
+}
+
+fn bench<B: StorageBackend>(
     text: &str,
+    make_backend: impl Fn(std::fs::File) -> std::result::Result<B, redb::Error>,
     n: u64,
     redb_cb: impl Fn(&mut redb::WriteTransaction<'_>),
     fs_cb: impl Fn(&mut std::fs::File),
@@ -15,7 +92,13 @@ fn bench(
     let mut builder = Database::builder();
     builder.set_cache_size(1024 * 1024 * 1024);
     std::fs::remove_file("test.redb").ok();
-    let db = builder.create("test.redb")?;
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open("test.redb")?;
+    let fb = make_backend(file)?;
+    let db = builder.create_with_backend(fb)?;
 
     println!("{}: writing to redb", text);
     let t0 = Instant::now();
@@ -35,6 +118,11 @@ fn bench(
     drop(db);
     let dt_redb = t0.elapsed().as_secs_f64();
     println!("{}: writing done {} {}s", text, n, dt_redb);
+    println!(
+        "{}: file size is {}",
+        text,
+        std::fs::metadata("test.redb")?.len()
+    );
     std::fs::remove_file("test.redb").ok();
 
     std::fs::remove_file("test.obao4").ok();
@@ -58,12 +146,23 @@ fn bench(
 fn main() -> Result<(), Error> {
     bench(
         "no sync",
+        |file| Ok(FileBackend::new(file)?),
         100000,
         |tx| tx.set_durability(redb::Durability::None),
         |_| {},
     )?;
     bench(
+        "flush/fast eventual",
+        |file| Ok(FastBackend::new(file)?),
+        100000,
+        |tx| tx.set_durability(redb::Durability::Eventual),
+        |f| {
+            f.flush().ok();
+        },
+    )?;
+    bench(
         "flush/eventual",
+        |file| Ok(FileBackend::new(file)?),
         100,
         |tx| tx.set_durability(redb::Durability::Eventual),
         |f| {
@@ -71,19 +170,12 @@ fn main() -> Result<(), Error> {
         },
     )?;
     bench(
-        "sync_all/immediate",
+        "sync_data/immediate",
+        |file| Ok(FileBackend::new(file)?),
         100,
         |tx| tx.set_durability(redb::Durability::Immediate),
         |f| {
-            f.sync_all().ok();
-        },
-    )?;
-    bench(
-        "sync_all/paranoid",
-        100,
-        |tx| tx.set_durability(redb::Durability::Paranoid),
-        |f| {
-            f.sync_all().ok();
+            f.sync_data().ok();
         },
     )?;
     Ok(())
