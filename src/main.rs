@@ -45,7 +45,7 @@ fn bench(
         file.write([0u8; 64].as_ref())?;
         fs_cb(&mut file);
     }
-    file.flush()?;
+    file.sync_all()?;
     drop(file);
     let dt_file = t0.elapsed().as_secs_f64();
     println!("{}: writing done {} {}s", text, n, dt_file);
@@ -63,11 +63,27 @@ fn main() -> Result<(), Error> {
         |_| {},
     )?;
     bench(
-        "sync",
+        "flush/eventual",
+        100,
+        |tx| tx.set_durability(redb::Durability::Eventual),
+        |f| {
+            f.flush().ok();
+        },
+    )?;
+    bench(
+        "sync_all/immediate",
         100,
         |tx| tx.set_durability(redb::Durability::Immediate),
         |f| {
-            f.flush().ok();
+            f.sync_all().ok();
+        },
+    )?;
+    bench(
+        "sync_all/paranoid",
+        100,
+        |tx| tx.set_durability(redb::Durability::Paranoid),
+        |f| {
+            f.sync_all().ok();
         },
     )?;
     Ok(())
